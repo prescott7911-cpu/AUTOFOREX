@@ -1,61 +1,46 @@
 """
-Download 1-2 years of XAU/USD M1 data from histdata.com and resample to M15.
-Saves to XAUUSD_M15.csv, ready for backtest.py and optimizer.py.
+Convert locally downloaded histdata.com zip files to XAUUSD_M15.csv.
 
-Usage:
-    python download_histdata.py
+STEP 1 — Download the data manually:
+  1. Go to: https://www.histdata.com/download-free-forex-data/?/ascii/1-minute-bar-quotes/XAUUSD
+  2. Select a year (e.g. 2024), download each month's zip file
+  3. Repeat for 2025 and 2026
+  4. Put all zip files into: C:\\Users\\presc\\AUTOFOREX\\histdata\\
 
-No account needed. Downloads ~12 monthly zip files (~50MB total).
+STEP 2 — Run this script:
+  python download_histdata.py
+
+Output: XAUUSD_M15.csv (~35,000 candles, ready for optimizer.py)
 """
 
-import requests
 import zipfile
-import io
 import pandas as pd
 from pathlib import Path
-from datetime import datetime, date
-import time
+import sys
 
+HISTDATA_DIR = Path("histdata")
 OUTPUT_FILE  = "XAUUSD_M15.csv"
-PAIR         = "XAUUSD"
-YEARS        = 2          # how many years back to fetch (max ~5 on histdata)
 RESAMPLE_TF  = "15min"
-SLEEP_SEC    = 1.5        # polite delay between requests
-
-HISTDATA_URL = "https://www.histdata.com/download-free-forex-historical-data/?/ascii/1-minute-bar-quotes/{pair}/{year}/{month}"
-HISTDATA_POST = "https://www.histdata.com/get.php"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer":    "https://www.histdata.com/",
-}
 
 
-def fetch_month(session, pair, year, month):
-    """Download one month of M1 data. Returns DataFrame or None."""
-    ref_url = HISTDATA_URL.format(pair=pair.lower(), year=year, month=month)
-
+def parse_zip(zip_path):
+    """Extract and parse one histdata zip file. Returns M1 DataFrame or None."""
     try:
-        # POST to get the zip
-        data = {
-            "tk":   _get_token(session, ref_url),
-            "date": str(year),
-            "datemonth": f"{month:02d}",
-            "platform": "ASCII",
-            "timeframe": "M1",
-            "fxpair": pair,
-        }
-        resp = session.post(HISTDATA_POST, data=data, headers={**HEADERS, "Referer": ref_url}, timeout=30)
-        if resp.status_code != 200 or len(resp.content) < 1000:
-            return None
+        with zipfile.ZipFile(zip_path) as zf:
+            # Find the data file inside the zip
+            data_file = next(
+                (n for n in zf.namelist() if n.upper().endswith(".CSV") or n.upper().endswith(".DAT")),
+                None
+            )
+            if not data_file:
+                print(f"    No CSV/DAT found in {zip_path.name}")
+                return None
 
-        zf = zipfile.ZipFile(io.BytesIO(resp.content))
-        csv_name = next((n for n in zf.namelist() if n.endswith(".csv") or n.endswith(".DAT")), None)
-        if not csv_name:
-            return None
+            raw = zf.read(data_file).decode("utf-8", errors="ignore")
 
-        raw = zf.read(csv_name).decode("utf-8", errors="ignore")
-        lines = [l for l in raw.strip().splitlines() if l.strip()]
+        lines = [l.strip() for l in raw.splitlines() if l.strip()]
+        if not lines:
+            return None
 
         rows = []
         for line in lines:
@@ -67,31 +52,22 @@ def fetch_month(session, pair, year, month):
             return None
 
         df = pd.DataFrame(rows, columns=["date", "time", "open", "high", "low", "close"])
-        df["datetime"] = pd.to_datetime(df["date"] + " " + df["time"], format="%Y%m%d %H%M%S", errors="coerce")
-        df = df.dropna(subset=["datetime"])
-        df = df.set_index("datetime")
+
+        # histdata format: YYYYMMDD, HHMMSS
+        df["datetime"] = pd.to_datetime(
+            df["date"].str.strip() + " " + df["time"].str.strip(),
+            format="%Y%m%d %H%M%S",
+            errors="coerce"
+        )
+        df = df.dropna(subset=["datetime"]).set_index("datetime")
         for col in ["open", "high", "low", "close"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df[["open", "high", "low", "close"]].dropna()
         return df
 
     except Exception as e:
-        print(f"    Error: {e}")
+        print(f"    Error reading {zip_path.name}: {e}")
         return None
-
-
-def _get_token(session, ref_url):
-    """Extract the CSRF-like token from the histdata page."""
-    try:
-        r = session.get(ref_url, headers=HEADERS, timeout=15)
-        for line in r.text.splitlines():
-            if "id=\"tk\"" in line:
-                start = line.find('value="') + 7
-                end   = line.find('"', start)
-                return line[start:end]
-    except Exception:
-        pass
-    return ""
 
 
 def resample_to_m15(m1_df):
@@ -104,56 +80,49 @@ def resample_to_m15(m1_df):
 
 
 if __name__ == "__main__":
-    now   = date.today()
-    pairs = []
-    for y in range(now.year, now.year - YEARS - 1, -1):
-        for m in range(12, 0, -1):
-            d = date(y, m, 1)
-            if d > now:
-                continue
-            if date(y, m, 1) < date(now.year - YEARS, now.month, 1):
-                break
-            pairs.append((y, m))
-    pairs = sorted(pairs)
+    if not HISTDATA_DIR.exists():
+        print(f"\nERROR: Folder '{HISTDATA_DIR}' not found.")
+        print("Create it and place your histdata.com zip files inside:")
+        print(f"  mkdir {HISTDATA_DIR}")
+        print("\nThen download zips from:")
+        print("  https://www.histdata.com/download-free-forex-data/?/ascii/1-minute-bar-quotes/XAUUSD")
+        sys.exit(1)
 
-    print(f"\nDownloading {PAIR} M1 data from histdata.com")
-    print(f"Period: {pairs[0][0]}-{pairs[0][1]:02d} to {pairs[-1][0]}-{pairs[-1][1]:02d}")
-    print(f"Months to fetch: {len(pairs)}\n")
+    zips = sorted(HISTDATA_DIR.glob("*.zip"))
+    if not zips:
+        print(f"\nNo zip files found in '{HISTDATA_DIR}/'.")
+        print("Download monthly zip files from histdata.com and place them there.")
+        sys.exit(1)
 
-    session = requests.Session()
-    frames  = []
+    print(f"\nFound {len(zips)} zip file(s) in '{HISTDATA_DIR}/':")
+    for z in zips:
+        print(f"  {z.name}")
 
-    for year, month in pairs:
-        label = f"{year}-{month:02d}"
-        print(f"  Fetching {label}...", end=" ", flush=True)
-        df = fetch_month(session, PAIR, year, month)
+    print(f"\nParsing M1 data...")
+    frames = []
+    for z in zips:
+        print(f"  {z.name}...", end=" ", flush=True)
+        df = parse_zip(z)
         if df is not None and not df.empty:
-            print(f"{len(df):,} M1 bars")
+            print(f"{len(df):,} bars")
             frames.append(df)
         else:
-            print("no data / skipped")
-        time.sleep(SLEEP_SEC)
+            print("skipped")
 
     if not frames:
-        print("\nNo data downloaded. Possible causes:")
-        print("  - histdata.com changed their page structure")
-        print("  - Network blocked the requests")
-        print("  - Try downloading manually from https://www.histdata.com")
-        print("    Select: Forex > XAUUSD > 1 Minute OHLC > year, then unzip and")
-        print("    save the .csv files in a 'histdata/' folder, then run:")
-        print("    python download_histdata.py --local histdata/")
-        exit(1)
+        print("\nNo data could be parsed. Check your zip files are from histdata.com (XAUUSD, M1, ASCII).")
+        sys.exit(1)
 
-    print(f"\nCombining {len(frames)} months of M1 data...")
+    print(f"\nCombining {len(frames)} month(s) of M1 data...")
     m1 = pd.concat(frames).sort_index()
     m1 = m1[~m1.index.duplicated(keep="first")]
     print(f"Total M1 bars: {len(m1):,}")
+    print(f"Range: {m1.index[0]} to {m1.index[-1]}")
 
     print(f"Resampling to M15...")
     m15 = resample_to_m15(m1)
     m15 = m15.reset_index().rename(columns={"datetime": "datetime"})
     m15.to_csv(OUTPUT_FILE, index=False)
 
-    print(f"\nSaved {len(m15):,} M15 candles to {OUTPUT_FILE}")
-    print(f"Range: {m15['datetime'].iloc[0]} to {m15['datetime'].iloc[-1]}")
-    print(f"\nNow run: python optimizer.py")
+    print(f"\nSaved {len(m15):,} M15 candles to '{OUTPUT_FILE}'")
+    print(f"Ready to run: python optimizer.py")
