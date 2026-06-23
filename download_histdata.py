@@ -14,6 +14,7 @@ Output: XAUUSD_M15.csv (~35,000 candles, ready for optimizer.py)
 """
 
 import zipfile
+import io
 import pandas as pd
 from pathlib import Path
 import sys
@@ -24,50 +25,83 @@ RESAMPLE_TF  = "15min"
 
 
 def parse_zip(zip_path):
-    """Extract and parse one histdata zip file. Returns M1 DataFrame or None."""
+    """Extract and parse one histdata zip file (annual or monthly). Returns M1 DataFrame or None."""
     try:
         with zipfile.ZipFile(zip_path) as zf:
-            # Find the data file inside the zip
-            data_file = next(
-                (n for n in zf.namelist() if n.upper().endswith(".CSV") or n.upper().endswith(".DAT")),
-                None
-            )
-            if not data_file:
-                print(f"    No CSV/DAT found in {zip_path.name}")
-                return None
+            names = zf.namelist()
 
-            raw = zf.read(data_file).decode("utf-8", errors="ignore")
+            # Annual zip: contains monthly zips inside — recurse into each
+            inner_zips = [n for n in names if n.upper().endswith(".ZIP")]
+            if inner_zips:
+                frames = []
+                for inner_name in sorted(inner_zips):
+                    inner_bytes = io.BytesIO(zf.read(inner_name))
+                    try:
+                        with zipfile.ZipFile(inner_bytes) as inner_zf:
+                            df = _parse_open_zip(inner_zf, inner_name)
+                            if df is not None:
+                                frames.append(df)
+                    except Exception:
+                        pass
+                return pd.concat(frames) if frames else None
 
-        lines = [l.strip() for l in raw.splitlines() if l.strip()]
-        if not lines:
-            return None
-
-        rows = []
-        for line in lines:
-            parts = line.split(",")
-            if len(parts) >= 6:
-                rows.append(parts[:6])
-
-        if not rows:
-            return None
-
-        df = pd.DataFrame(rows, columns=["date", "time", "open", "high", "low", "close"])
-
-        # histdata format: YYYYMMDD, HHMMSS
-        df["datetime"] = pd.to_datetime(
-            df["date"].str.strip() + " " + df["time"].str.strip(),
-            format="%Y%m%d %H%M%S",
-            errors="coerce"
-        )
-        df = df.dropna(subset=["datetime"]).set_index("datetime")
-        for col in ["open", "high", "low", "close"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df[["open", "high", "low", "close"]].dropna()
-        return df
+            # Monthly zip: contains CSV/DAT directly
+            return _parse_open_zip(zf, zip_path.name)
 
     except Exception as e:
         print(f"    Error reading {zip_path.name}: {e}")
         return None
+
+
+def _parse_open_zip(zf, label):
+    """Parse an already-open ZipFile containing a CSV or DAT data file."""
+    import io as _io
+    data_file = next(
+        (n for n in zf.namelist() if n.upper().endswith(".CSV") or n.upper().endswith(".DAT")),
+        None
+    )
+    if not data_file:
+        return None
+
+    raw = zf.read(data_file).decode("utf-8", errors="ignore")
+
+    lines = [l.strip() for l in raw.splitlines() if l.strip()]
+    if not lines:
+        return None
+
+    # Detect delimiter (comma or semicolon)
+    sample = lines[0]
+    delim = ";" if ";" in sample else ","
+
+    rows = []
+    for line in lines:
+        parts = line.split(delim)
+        if len(parts) >= 5:
+            rows.append(parts)
+
+    if not rows:
+        return None
+
+    # histdata formats:
+    #   semicolon: "20240101 180000;open;high;low;close;vol"  (datetime in one field)
+    #   comma:     "20240101,180000,open,high,low,close"       (date + time split)
+    if delim == ";":
+        df = pd.DataFrame(rows)
+        df["datetime"] = pd.to_datetime(df[0].str.strip(), format="%Y%m%d %H%M%S", errors="coerce")
+        df = df.rename(columns={1: "open", 2: "high", 3: "low", 4: "close"})
+    else:
+        df = pd.DataFrame(rows)
+        df["datetime"] = pd.to_datetime(
+            df[0].str.strip() + " " + df[1].str.strip(),
+            format="%Y%m%d %H%M%S",
+            errors="coerce"
+        )
+        df = df.rename(columns={2: "open", 3: "high", 4: "low", 5: "close"})
+
+    df = df.dropna(subset=["datetime"]).set_index("datetime")
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df[["open", "high", "low", "close"]].dropna()
 
 
 def resample_to_m15(m1_df):
