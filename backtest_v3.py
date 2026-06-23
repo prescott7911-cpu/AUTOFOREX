@@ -40,8 +40,8 @@ MIN_RR = 1.5
 # NEW v3 settings
 H4_EMA_PROXIMITY_PIPS = 50        # Filter 1: max pips from H4 20 EMA at entry
 SESSION_WINDOWS_GMT = [            # Filter 3: allowed trading hours (UTC/GMT)
-    (7, 10),                       # London open
-    (13, 16),                      # New York open
+    (7, 12),                       # London open (extended)
+    (13, 17),                      # New York open (extended)
 ]
 ATR_PERIOD = 14                    # Filter 4: ATR period
 ATR_MA_PERIOD = 20                 # Filter 4: ATR moving average period
@@ -169,7 +169,7 @@ def is_bearish_engulfing(df, i):
     return (p_c > p_o and c_c < c_o and c_c < p_o and c_o > p_c)
 
 
-def pullback_held_two_candles(df, i, trend, tolerance=0.0008):
+def pullback_held_two_candles(df, i, trend, tolerance=0.002):
     if i < 3:
         return False
     for lookback in [2, 1]:
